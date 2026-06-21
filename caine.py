@@ -13,7 +13,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 @app.get("/", response_class=HTMLResponse)
 def read_root():
-    return """<!DOCTYPE html>
+    html_content = """<!DOCTYPE html>
 <html lang="uk">
 <head>
     <meta charset="UTF-8">
@@ -50,6 +50,7 @@ def read_root():
     <script>
         const chatbox = document.getElementById('chatbox');
         const userInput = document.getElementById('userInput');
+
         function appendMessage(text, side) {
             const msg = document.createElement('div');
             msg.classList.add('message', side);
@@ -57,12 +58,20 @@ def read_root():
             chatbox.appendChild(msg);
             chatbox.scrollTop = chatbox.scrollHeight;
         }
-        function handleKey(e) { if (e.key === 'Enter') sendMessage(); }
+
+        function handleKey(e) { 
+            if (e.key === 'Enter') {
+                sendMessage(); 
+            }
+        }
+
         async function sendMessage() {
             const text = userInput.value.trim();
             if (!text) return;
+            
             appendMessage(text, 'user');
             userInput.value = '';
+            
             try {
                 const response = await fetch('/chat', {
                     method: 'POST',
@@ -78,18 +87,22 @@ def read_root():
     </script>
 </body>
 </html>"""
+    return HTMLResponse(content=html_content)
 
 @app.post("/chat")
 async def chat_with_gemini(data: ChatMessage):
     if not GEMINI_API_KEY:
         return {"reply": "Помилка: На сервері не налаштовано GEMINI_API_KEY!"}
+    
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    
     payload = {
         "contents": [{"parts": [{"text": data.message}]}],
         "systemInstruction": {
             "parts": [{"text": "Ти — хлопець на ім'я Алекс (нік cartin). Твій стиль спілкування — максимально розслаблений (chill), дружній, пофігістичний. Відповідай коротко, використовуй сленг. Спілкуйся тією мовою, якою до тебе звертаються."}]
         }
     }
+    
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(url, json=payload, timeout=20.0)
