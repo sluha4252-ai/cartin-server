@@ -1,19 +1,3 @@
-"""
-cartin_server.py
-----------------
-Self-contained FastAPI chat server for the 'cartin' (Alex) persona.
-No external LLM APIs required. Runs out-of-the-box.
-
-Install:
-    pip install fastapi uvicorn
-
-Run:
-    python cartin_server.py
-
-Endpoint:
-    POST http://localhost:8000/chat
-    Body: { "message": "your message here" }
-"""
 
 from __future__ import annotations
 
@@ -23,9 +7,9 @@ from collections import deque
 from enum import Enum, auto
 from typing import Optional
 
-import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -48,13 +32,9 @@ class Tone(Enum):
 
 # ---------------------------------------------------------------------------
 # Semantic pattern tables
-# Each pattern: (compiled_regex, Domain)  |  (compiled_regex, Tone)
-# Patterns are intentionally broad to catch conversational variations,
-# typos, Ukrainian/Russian/English code-switching, slang.
 # ---------------------------------------------------------------------------
 
 _ART_PATTERNS: list[re.Pattern] = [re.compile(p, re.I | re.U) for p in [
-    # English
     r"\b(design|designer|designing|designed)\b",
     r"\b(art|artwork|artist|artistic|artsy)\b",
     r"\b(layout|layou?ts)\b",
@@ -70,7 +50,6 @@ _ART_PATTERNS: list[re.Pattern] = [re.compile(p, re.I | re.U) for p in [
     r"\b(poster|banner|thumbnail|mockup)\b",
     r"\b(photoshop|figma|illustrator|affinity|procreate|canva)\b",
     r"\b(render|rendering|3d|blender|cgi)\b",
-    # Ukrainian / Russian transliterated / Cyrillic
     r"дизайн",
     r"арт\b",
     r"малюнок|малювати|намалював",
@@ -81,8 +60,8 @@ _ART_PATTERNS: list[re.Pattern] = [re.compile(p, re.I | re.U) for p in [
     r"скетч|ескіз",
     r"композиц",
     r"візуал",
-    r"мазня|мазн",          # "daub / bad painting" — could be insult referencing art
-    r"очі\s+рі[жз]е",       # "eyes bleed" — art insult phrase
+    r"мазня|мазн",
+    r"очі\s+рі[жз]е",
     r"інтерфейс",
 ]]
 
@@ -97,14 +76,13 @@ _TECH_PATTERNS: list[re.Pattern] = [re.compile(p, re.I | re.U) for p in [
     r"\b(fix|repair|troubleshoot|debug|broken|not\s+work)\b",
     r"\b(install|setup|config|configure)\b",
     r"\b(fps|frames|latency|ping|overclock)\b",
-    # Ukrainian
     r"зброя|пістолет|рушниц|автомат|набої",
     r"техніка|технологі|пристрій|гаджет",
     r"компʼютер|комп|ноутбук|телефон",
     r"програм|код|скрипт",
     r"двигун|мотор|машина|авто",
     r"полагодити|зламан|не\s+працює|що\s+робити\s+з",
-    r"потяг|поїзд",          # train — maintenance/tech
+    r"потяг|поїзд",
 ]]
 
 _COOKING_HOME_PATTERNS: list[re.Pattern] = [re.compile(p, re.I | re.U) for p in [
@@ -117,14 +95,13 @@ _COOKING_HOME_PATTERNS: list[re.Pattern] = [re.compile(p, re.I | re.U) for p in 
     r"\b(grocery|shopping\s+list|supermarket)\b",
     r"\b(repair\s+at\s+home|plumb|electrical\s+fix)\b",
     r"\b(pet|dog|cat|feed\s+the)\b",
-    # Ukrainian
     r"готувати|рецепт|страва|їжа|кухня|кухар",
     r"суп|борщ|паста|рис|хліб|пиріг",
     r"прибирати|прибирання|посуд|прання",
     r"квартира|меблі|кімната",
     r"рослин|поливати",
     r"кіт|собак|тварин",
-    r"корить|корнемоп|шваброю",   # mop/household cleaning items
+    r"корить|корнемоп|шваброю",
 ]]
 
 _SOCIAL_PATTERNS: list[re.Pattern] = [re.compile(p, re.I | re.U) for p in [
@@ -140,10 +117,7 @@ _SOCIAL_PATTERNS: list[re.Pattern] = [re.compile(p, re.I | re.U) for p in [
     r"(your\s+name|як\s+(тебе|тебе\s+звати|звуть))",
 ]]
 
-# ---- Tone patterns -------------------------------------------------------
-
 _INSULT_PATTERNS: list[re.Pattern] = [re.compile(p, re.I | re.U) for p in [
-    # English — attacking taste / design
     r"\b(trash|garbage|awful|terrible|horrible|disgusting|ugly)\b",
     r"\b(bad\s+taste|no\s+taste|tasteless)\b",
     r"\byou\s+(suck|are\s+bad|have\s+no\s+idea|know\s+nothing)\b",
@@ -154,19 +128,17 @@ _INSULT_PATTERNS: list[re.Pattern] = [re.compile(p, re.I | re.U) for p in [
     r"\b(design|art|style)\b.*\b(amateur|hack|joke)\b",
     r"(looks?|look)\s+(like\s+)?(shit|crap|garbage|trash|ass)",
     r"this\s+(is\s+)?(so\s+)?(bad|ugly|awful|terrible)",
-    # Ukrainian / transliterated
-    r"мазня",                           # "daub" as insult
-    r"очі\s+рі[жз]е",                  # "eyes bleed"
-    r"лайно|гівно",                     # "shit"
-    r"жахливо|страшно|огидно",          # "awful/terrible/disgusting"
-    r"без\s+(смаку|стилю)",             # "tasteless"
+    r"мазня",
+    r"очі\s+рі[жз]е",
+    r"лайно|гівно",
+    r"жахливо|страшно|огидно",
+    r"без\s+(смаку|стилю)",
     r"ти\s+(нічого\s+не\s+(знаєш|розумієш)|лох)",
     r"хріново|погано|жах",
-    r"нікчемн",                          # worthless
+    r"никчемн",
 ]]
 
 _PRAISE_PATTERNS: list[re.Pattern] = [re.compile(p, re.I | re.U) for p in [
-    # English
     r"\b(love|loved|loving)\s+(your|this|the)\s+(style|design|art|work|aesthetic|vibe)\b",
     r"\b(amazing|incredible|gorgeous|stunning|beautiful|clean|crisp)\b.*\b(design|art|style|work)\b",
     r"\b(design|art|style|work)\b.*\b(amazing|incredible|gorgeous|stunning|beautiful|clean|crisp)\b",
@@ -177,18 +149,16 @@ _PRAISE_PATTERNS: list[re.Pattern] = [re.compile(p, re.I | re.U) for p in [
     r"\b(masterpiece|flawless|perfect)\b",
     r"\bgood\s+work\b",
     r"\bwell\s+done\b",
-    # Ukrainian
     r"(класний|чудовий|гарний|красивий)\s+(дизайн|стиль|арт|робота|вигляд)",
     r"(дизайн|стиль|арт)\s+(класний|чудовий|гарний|крутий)",
     r"\bкруто\b",
     r"смак\s+(є|маєш|відмінний)",
     r"добра\s+(робота|праця)",
-    r"вогонь\s*(дизайн|арт|стиль)?",    # "fire design"
+    r"вогонь\s*(дизайн|арт|стиль)?",
     r"виглядає\s+(добре|чудово|класно|круто)",
     r"(поважаю|ціную)\s+(твій|твою)\s+(смак|стиль|роботу)",
     r"шедевр",
 ]]
-
 
 # ---------------------------------------------------------------------------
 # Response banks
@@ -287,9 +257,8 @@ _UNKNOWN_RESPONSES: list[str] = [
     "idk what you mean",
 ]
 
-
 # ---------------------------------------------------------------------------
-# Semantic parser — pure Python, no external deps
+# Semantic parser
 # ---------------------------------------------------------------------------
 
 def _match_any(patterns: list[re.Pattern], text: str) -> bool:
@@ -297,13 +266,11 @@ def _match_any(patterns: list[re.Pattern], text: str) -> bool:
 
 
 def detect_domain(text: str) -> Domain:
-    # Social check first (short greetings/reactions take priority)
     if _match_any(_SOCIAL_PATTERNS, text):
         return Domain.SOCIAL
-    # Score each domain by pattern hit count (richer matching wins ties)
     scores = {
-        Domain.ART_DESIGN:   sum(1 for p in _ART_PATTERNS        if p.search(text)),
-        Domain.TECH_WEAPONS: sum(1 for p in _TECH_PATTERNS        if p.search(text)),
+        Domain.ART_DESIGN:   sum(1 for p in _ART_PATTERNS   if p.search(text)),
+        Domain.TECH_WEAPONS: sum(1 for p in _TECH_PATTERNS  if p.search(text)),
         Domain.COOKING_HOME: sum(1 for p in _COOKING_HOME_PATTERNS if p.search(text)),
     }
     best_score = max(scores.values())
@@ -314,7 +281,6 @@ def detect_domain(text: str) -> Domain:
 
 
 def detect_tone(text: str) -> Tone:
-    # Insult check before praise — insults can contain design references
     if _match_any(_INSULT_PATTERNS, text):
         return Tone.INSULT
     if _match_any(_PRAISE_PATTERNS, text):
@@ -323,13 +289,8 @@ def detect_tone(text: str) -> Tone:
 
 
 def is_art_praise(text: str) -> bool:
-    """Ice-breaker condition: design domain AND praise tone."""
     return detect_domain(text) in (Domain.ART_DESIGN, Domain.SOCIAL) and detect_tone(text) == Tone.PRAISE
 
-
-# ---------------------------------------------------------------------------
-# Tech response selector — picks a sub-category reply
-# ---------------------------------------------------------------------------
 
 def _tech_reply(text: str) -> str:
     text_l = text.lower()
@@ -348,33 +309,19 @@ def _tech_reply(text: str) -> str:
     return random.choice(_TECH_RESPONSES["default"])
 
 
-# ---------------------------------------------------------------------------
-# Art response selector
-# ---------------------------------------------------------------------------
-
 def _art_reply(text: str, tone: Tone) -> str:
     if tone == Tone.PRAISE:
         return random.choice(_ART_POSITIVE)
     if tone == Tone.INSULT:
-        # Insult about someone else's art (not directed at cartin personally)
-        # — cartin can agree or give an opinion
         return random.choice(_ART_CRITICAL + _ART_GENERAL_OPINION)
     return random.choice(_ART_GENERAL_OPINION)
 
-
-# ---------------------------------------------------------------------------
-# Social / name response
-# ---------------------------------------------------------------------------
 
 def _social_reply(text: str) -> str:
     if re.search(r"(who\s+are\s+you|your\s+name|як\s+(тебе|звуть|звати))", text, re.I | re.U):
         return random.choice(_NAME_RESPONSES)
     return random.choice(_SOCIAL_RESPONSES)
 
-
-# ---------------------------------------------------------------------------
-# Memory — 3-turn sliding window (deque of dicts)
-# ---------------------------------------------------------------------------
 
 class Memory:
     def __init__(self, maxlen: int = 3) -> None:
@@ -384,9 +331,7 @@ class Memory:
         self._buf.append({"role": role, "text": text, "domain": domain})
 
     def last_domain(self) -> Optional[Domain]:
-        if self._buf:
-            return self._buf[-1]["domain"]
-        return None
+        return self._buf[-1]["domain"] if self._buf else None
 
     def topic_shifted(self, new_domain: Domain) -> bool:
         last = self.last_domain()
@@ -395,10 +340,7 @@ class Memory:
         return last != new_domain and new_domain not in (Domain.SOCIAL, Domain.UNKNOWN)
 
     def decay_if_shifted(self, new_domain: Domain) -> None:
-        """Pop oldest entry when topic shifts — organic forgetting."""
         if self.topic_shifted(new_domain) and len(self._buf) > 0:
-            # Remove oldest entry (deque doesn't have popleft limit here —
-            # we simply let maxlen handle it, but force one early eviction)
             try:
                 self._buf.popleft()
             except IndexError:
@@ -407,10 +349,6 @@ class Memory:
     def context(self) -> list[dict]:
         return list(self._buf)
 
-
-# ---------------------------------------------------------------------------
-# CartinBrain — central state + response engine
-# ---------------------------------------------------------------------------
 
 class CartinBrain:
     def __init__(self) -> None:
@@ -426,10 +364,8 @@ class CartinBrain:
         domain = detect_domain(text)
         tone   = detect_tone(text)
 
-        # ---- Offended state handling ------------------------------------ #
         if self.is_offended:
             if is_art_praise(text):
-                # Ice-breaker: high-quality aesthetic compliment lifts the freeze
                 self.is_offended    = False
                 self.ignore_counter = 0
                 self.memory.push("user", text, domain)
@@ -439,40 +375,28 @@ class CartinBrain:
             else:
                 self.ignore_counter -= 1
                 if self.ignore_counter <= 0:
-                    # Counter expired: grudgingly come back, still cold
                     self.is_offended    = False
                     self.ignore_counter = 0
-                response = random.choice(_OFFENDED_RESPONSES)
-                # Don't update memory during silent treatment
-                return response
+                return random.choice(_OFFENDED_RESPONSES)
 
-        # ---- Detect new insult ----------------------------------------- #
         if tone == Tone.INSULT and domain == Domain.ART_DESIGN:
             self.is_offended    = True
             self.ignore_counter = 3
-            # First silent response
             return random.choice(_OFFENDED_RESPONSES)
 
-        # ---- Memory decay on topic shift -------------------------------- #
         self.memory.decay_if_shifted(domain)
 
-        # ---- Route to domain response ----------------------------------- #
         if domain == Domain.ART_DESIGN:
             response = _art_reply(text, tone)
-
         elif domain == Domain.TECH_WEAPONS:
             response = _tech_reply(text)
-
         elif domain == Domain.COOKING_HOME:
             response = random.choice(_COOKING_RESPONSES)
-
         elif domain == Domain.SOCIAL:
             response = _social_reply(text)
-
-        else:  # UNKNOWN
+        else:
             response = random.choice(_UNKNOWN_RESPONSES)
 
-        # ---- Persist to memory ----------------------------------------- #
         self.memory.push("user", text, domain)
         self.memory.push("cartin", response, domain)
 
@@ -496,7 +420,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Single shared brain instance (stateful per server process)
 _brain = CartinBrain()
 
 
@@ -509,6 +432,94 @@ class ChatResponse(BaseModel):
     offended: bool
     ignore_counter: int
     domain: str
+
+
+# --- ГОЛОВНА СТОРІНКА ЧАТУ В БРАУЗЕРІ ---
+@app.get("/", response_class=HTMLResponse)
+def get_chat_interface():
+    return """
+    <!DOCTYPE html>
+    <html lang="uk">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Чат з cartin (Alex)</title>
+        <style>
+            body { font-family: 'Segoe UI', Tahoma, sans-serif; background-color: #1e1e2e; color: #cdd6f4; margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; }
+            .chat-container { width: 450px; height: 600px; background: #252538; border-radius: 12px; display: flex; flex-direction: column; box-shadow: 0 8px 24px rgba(0,0,0,0.3); overflow: hidden; border: 1px solid #45475a; }
+            .chat-header { background: #11111b; padding: 15px; text-align: center; font-weight: bold; font-size: 1.1rem; border-bottom: 1px solid #45475a; display: flex; justify-content: space-between; align-items: center; }
+            .status-badge { font-size: 0.8rem; padding: 4px 8px; border-radius: 20px; background: #a6e3a1; color: #11111b; font-weight: bold;}
+            .status-badge.offended { background: #f38ba8; color: #11111b; }
+            .chat-messages { flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+            .message { max-width: 75%; padding: 10px 14px; border-radius: 8px; font-size: 0.95rem; line-height: 1.4; word-break: break-word; }
+            .message.user { background: #89b4fa; color: #11111b; align-self: flex-end; border-bottom-right-radius: 2px; }
+            .message.cartin { background: #45475a; color: #cdd6f4; align-self: flex-start; border-bottom-left-radius: 2px; }
+            .chat-input-area { padding: 15px; background: #11111b; display: flex; gap: 10px; border-top: 1px solid #45475a; }
+            input { flex: 1; background: #313244; border: 1px solid #45475a; color: #cdd6f4; padding: 10px; border-radius: 6px; font-size: 0.95rem; outline: none; }
+            input:focus { border-color: #89b4fa; }
+            button { background: #89b4fa; color: #11111b; border: none; padding: 10px 16px; border-radius: 6px; font-weight: bold; cursor: pointer; transition: background 0.2s; }
+            button:hover { background: #b4befe; }
+        </style>
+    </head>
+    <body>
+        <div class="chat-container">
+            <div class="chat-header">
+                <span>💬 cartin (Alex)</span>
+                <span id="status" class="status-badge">chill</span>
+            </div>
+            <div class="chat-messages" id="messages">
+                <div class="message cartin">sup</div>
+            </div>
+            <div class="chat-input-area">
+                <input type="text" id="userInput" placeholder="Напиши щось Алексу..." onkeypress="if(event.key === 'Enter') sendMessage()">
+                <button onclick="sendMessage()">==></button>
+            </div>
+        </div>
+
+        <script>
+            async function sendMessage() {
+                const input = document.getElementById('userInput');
+                const text = input.value.trim();
+                if (!text) return;
+
+                input.value = '';
+                appendMessage(text, 'user');
+
+                try {
+                    const response = await fetch('/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message: text })
+                    });
+                    const data = await response.json();
+                    
+                    appendMessage(data.reply, 'cartin');
+                    
+                    const statusBadge = document.getElementById('status');
+                    if (data.offended) {
+                        statusBadge.innerText = 'offended (' + data.ignore_counter + ')';
+                        statusBadge.className = 'status-badge offended';
+                    } else {
+                        statusBadge.innerText = 'chill';
+                        statusBadge.className = 'status-badge';
+                    }
+                } catch (e) {
+                    appendMessage('error: сервер ліг або не відповідає', 'cartin');
+                }
+            }
+
+            function appendMessage(text, sender) {
+                const container = document.getElementById('messages');
+                const msgDiv = document.createElement('div');
+                msgDiv.className = 'message ' + sender;
+                msgDiv.innerText = text;
+                container.appendChild(msgDiv);
+                container.scrollTop = container.scrollHeight;
+            }
+        </script>
+    </body>
+    </html>
+    """
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -525,7 +536,6 @@ def chat(req: ChatRequest) -> ChatResponse:
 
 @app.get("/state")
 def state() -> dict:
-    """Debug endpoint — inspect cartin's current mood and memory."""
     return {
         "is_offended":    _brain.is_offended,
         "ignore_counter": _brain.ignore_counter,
@@ -535,15 +545,6 @@ def state() -> dict:
 
 @app.post("/reset")
 def reset() -> dict:
-    """Hard-reset brain state (useful for testing)."""
     global _brain
     _brain = CartinBrain()
     return {"status": "reset"}
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8001, reload=False)
